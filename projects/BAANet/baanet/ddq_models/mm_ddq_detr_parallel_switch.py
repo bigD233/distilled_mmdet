@@ -207,6 +207,8 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
         def is_substring_of_key(dict_obj, sub_str):
             return any(sub_str in key for key in dict_obj.keys())
         new_keys = [x[0] for x in list(self.named_parameters()) if 'ir' in x[0]]
+        reg_keys_6 = [x[0] for x in list(self.named_parameters()) if 'bbox_head.reg_branches.6' in x[0]]
+        reg_keys_7 = [x[0] for x in list(self.named_parameters()) if 'bbox_head.reg_branches.7' in x[0]]
         if not is_substring_of_key(state_dict, 'backbone_ir'):
             ori_dict = copy.deepcopy(state_dict)
             num_new_keys = 0
@@ -215,6 +217,10 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
                 assert ori_key in state_dict.keys()
                 state_dict[new_key] = state_dict[ori_key]
                 num_new_keys += 1
+            for key in reg_keys_6:
+                state_dict[new_key.replace('6', '8')] = state_dict[key]
+            for key in reg_keys_7:
+                state_dict[new_key.replace('7', '9')] = state_dict[key]
             del ori_dict
         super()._load_from_state_dict(state_dict, prefix, local_metadata,
                                       strict, missing_keys, unexpected_keys,
@@ -237,9 +243,11 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
 
         if self.training:
             # -1 is the aux head for the encoder
-            dense_enc_outputs_class = self.bbox_head.cls_branches[-1]( # [2, 7953, 1]
+            dense_enc_outputs_class = self.bbox_head.cls_branches[
+                self.decoder.num_layers+1]( # [2, 7953, 1]
                 output_memory)
-            dense_enc_outputs_coord_unact = self.bbox_head.reg_branches[-1]( # [2, 7953, 4]
+            dense_enc_outputs_coord_unact = self.bbox_head.reg_branches[
+                self.decoder.num_layers+1]( # [2, 7953, 4]
                 output_memory) + output_proposals
 
         topk = self.num_queries # 900
@@ -316,18 +324,18 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
         if self.training:
             dn_label_query, dn_bbox_query, dn_mask, dn_meta = \
                 self.dn_query_generator(batch_data_samples)
-            query = torch.cat([dn_label_query, query], dim=1) # [B, 2250 + 198, 256]
+            query = torch.cat([dn_label_query, query], dim=1) # [B, 198(dn_query) + 500(query) + 500(dense), 256]
             reference_points = torch.cat([dn_bbox_query, topk_coords_unact],
                                          dim=1)
-            ori_size = dn_mask.size(-1)
-            new_size = dn_mask.size(-1) + num_dense_queries
+            ori_size = dn_mask.size(-1) # 198 + 500
+            new_size = dn_mask.size(-1) + num_dense_queries # 198 + 500 + 500
 
             new_dn_mask = dn_mask.new_ones((new_size, new_size)).bool()
             dense_mask = torch.zeros(num_dense_queries,
                                      num_dense_queries).bool()
-            self.cache_dict['dis_query_info'] = [dn_label_query.size(1) * 2, topk * 2]
+            self.cache_dict['dis_query_info'] = [dn_label_query.size(1), topk * 2]
 
-            new_dn_mask[ori_size:, ori_size:] = dense_mask # [1350, 1350]
+            new_dn_mask[ori_size:, ori_size:] = dense_mask # [1198, 1198]
             new_dn_mask[:ori_size, :ori_size] = dn_mask # [1098, 1098]
             dn_meta['num_dense_queries'] = num_dense_queries
             dn_mask = new_dn_mask
@@ -365,15 +373,17 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
         output_memory, output_proposals = self.gen_encoder_output_proposals_ir(
             memory, memory_mask, spatial_shapes)
         enc_outputs_class = self.bbox_head.cls_branches[ # [2, 7953, 1]
-            self.decoder.num_layers+1](output_memory)
+            self.decoder.num_layers+2](output_memory)
         enc_outputs_coord_unact = self.bbox_head.reg_branches[ # [2, 7953, 4]
-            self.decoder.num_layers+1](output_memory) + output_proposals
+            self.decoder.num_layers+2](output_memory) + output_proposals
 
         if self.training:
             # -1 is the aux head for the encoder
-            dense_enc_outputs_class = self.bbox_head.cls_branches[-2]( # [2, 7953, 1]
+            dense_enc_outputs_class = self.bbox_head.cls_branches[
+                self.decoder.num_layers+3]( # [2, 7953, 1]
                 output_memory)
-            dense_enc_outputs_coord_unact = self.bbox_head.reg_branches[-2]( # [2, 7953, 4]
+            dense_enc_outputs_coord_unact = self.bbox_head.reg_branches[
+                self.decoder.num_layers+3]( # [2, 7953, 4]
                 output_memory) + output_proposals
 
         topk = self.num_queries # 900
@@ -450,21 +460,23 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
         if self.training:
             dn_label_query, dn_bbox_query, dn_mask, dn_meta = \
                 self.dn_query_generator_ir(batch_data_samples)
-            query = torch.cat([dn_label_query, query], dim=1) # [B, 2250 + 198, 256]
+            # query = torch.cat([dn_label_query, query], dim=1) # [B, 2250 + 198, 256]
             reference_points = torch.cat([dn_bbox_query, topk_coords_unact],
                                          dim=1)
+            reference_points = topk_coords_unact
             ori_size = dn_mask.size(-1) # 900 + 198
             new_size = dn_mask.size(-1) + num_dense_queries # 900 + 198 + 1350
 
             new_dn_mask = dn_mask.new_ones((new_size, new_size)).bool()
             dense_mask = torch.zeros(num_dense_queries,
                                      num_dense_queries).bool()
-            self.cache_dict['dis_query_info'] = [dn_label_query.size(1) * 2, topk * 2]
+            self.cache_dict['dis_query_info'] = [dn_label_query.size(1), topk * 2]
 
             new_dn_mask[ori_size:, ori_size:] = dense_mask
             new_dn_mask[:ori_size, :ori_size] = dn_mask
             dn_meta['num_dense_queries'] = num_dense_queries 
-            dn_mask = new_dn_mask
+            # ignore the dn mask
+            dn_mask = new_dn_mask[dn_label_query.size(1): , dn_label_query.size(1):]
             self.cache_dict['num_dense_queries'] = num_dense_queries * 2
             self.decoder.aux_reg_branches = self.bbox_head.aux_reg_branches
 
@@ -478,7 +490,7 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
         decoder_inputs_dict = dict(query_ir=query, # [2, 2448, 256]
                                    memory_ir=memory, # [2, 7953, 256]
                                    reference_points_ir=reference_points, # [2, 2448, 4]
-                                   dn_mask=dn_mask) # [2448, 2448]
+                                   dn_mask_ir=dn_mask) # [2448, 2448]
         head_inputs_dict = dict(enc_outputs_class_ir=topk_score, # [2, 900, 1]
                                 enc_outputs_coord_ir=topk_anchor, # [2, 900, 4]
                                 dn_meta=dn_meta) if self.training else dict()
@@ -534,10 +546,11 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
         decoder_inputs_dict.update(tmp_dec_in)
         decoder_inputs_dict.update(tmp_dec_in_ir)
         if self.training:
-            for k, v in head_inputs_dict['dn_meta'].items():
-                head_inputs_dict['dn_meta'][k] = v * 2
+            head_inputs_dict['dn_meta']['num_dense_queries'] *= 2 
+            head_inputs_dict_ir['dn_meta']['num_dense_queries'] *= 2 
         decoder_outputs_dict = self.forward_decoder(**decoder_inputs_dict)
         head_inputs_dict.update(decoder_outputs_dict)
+        head_inputs_dict.update(head_inputs_dict_ir)
         return head_inputs_dict
 
     def forward_encoder(self, feat: Tensor, feat_mask: Tensor,
@@ -639,7 +652,8 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
                         spatial_shapes: Tensor,
                         level_start_index: Tensor,
                         valid_ratios: Tensor,
-                        dn_mask: Optional[Tensor] = None) -> Dict:
+                        dn_mask: Optional[Tensor] = None,
+                        dn_mask_ir: Optional[Tensor] = None) -> Dict:
         """Forward with Transformer decoder.
 
         The forward procedure of the transformer is defined as:
@@ -679,16 +693,40 @@ class ParallelMultiModalDDQDETR(MultiModalDINO):
             `hidden_states` of the decoder output and `references` including
             the initial and intermediate reference_points.
         """
-        all_query = torch.cat([query, query_ir], dim = 1) # [2, 4896, 256]
-        all_ref_pts = torch.cat([reference_points, reference_points_ir], dim = 1) # [2, 4896, 4]
-        all_memory = torch.cat([memory, memory_ir], dim = 1) # [2, 15906, 256]
+        num_dn, num_ds = self.cache_dict['dis_query_info']
+        half_num_ds = int(num_ds/2)
         if self.training:
-            new_size = dn_mask.size(-1)
-            new_dn_mask = dn_mask.new_ones((new_size * 2, new_size * 2)).bool()
-            new_dn_mask[:new_size, :new_size] = dn_mask
-            new_dn_mask[new_size:, new_size:] = dn_mask # [4896, 4896]
+            half_num_dense = int(self.cache_dict['num_dense_queries'] / 2)
+        all_query = torch.cat([query[:, :num_dn, :], # dn query
+                               query[:, num_dn : num_dn+half_num_ds, :], # rgb normal query
+                               query_ir[:, : half_num_ds, :], # ir normal query
+                               query[:, num_dn+half_num_ds :, :], # rgb dense query
+                               query_ir[:, half_num_ds :, :], # ir dense query
+                               ], dim = 1).contiguous() # [2, 1198(198+500+500) + 1000(500+500), 256]
+        all_ref_pts = torch.cat([reference_points[:, :num_dn, :], # dn reference_points
+                               reference_points[:, num_dn:num_dn+half_num_ds, :], # rgb normal reference_points
+                               reference_points_ir[:, :half_num_ds, :], # ir normal qreference_pointsuery
+                               reference_points[:, num_dn+half_num_ds:, :], # rgb dense reference_points
+                               reference_points_ir[:, half_num_ds:, :], # ir dense reference_points
+                               ], dim = 1).contiguous() # [2, 1198(198+500+500) + 1000(500+500), 256]
+
+        if self.training:
+            new_dn_mask = dn_mask.new_ones((dn_mask.size(-1)+dn_mask_ir.size(-1), 
+                                            dn_mask.size(-1)+dn_mask_ir.size(-1))).bool()
+
+            new_dn_mask[:num_dn+half_num_ds, 
+                        :num_dn+half_num_ds] = dn_mask[:num_dn+half_num_ds, :num_dn+half_num_ds] # 198 + 500
+            new_dn_mask[num_dn+half_num_ds : num_dn+num_ds, 
+                        num_dn+half_num_ds : num_dn+num_ds] = dn_mask_ir[:half_num_ds, :half_num_ds]  # 198 + 500 + 500
+            new_dn_mask[num_dn+num_ds : num_dn+num_ds+half_num_dense, 
+                        num_dn+num_ds : num_dn+num_ds+half_num_dense] = dn_mask[num_dn+half_num_ds:, 
+                                                                             num_dn+half_num_ds:]  # 198 + 500 + 500 + 500(dense)
+            new_dn_mask[num_dn+num_ds+half_num_dense : num_dn+num_ds+half_num_dense*2, 
+                        num_dn+num_ds+half_num_dense : num_dn+num_ds+half_num_dense*2] = dn_mask_ir[half_num_ds:, half_num_ds:]  # 198 + 500 + 500 + 500(dense) + 500(dense)
         else:
             new_dn_mask = None
+
+        all_memory = torch.cat([memory, memory_ir], dim = 1) # [2, 15906, 256]
 
         inter_states, references = self.decoder( # [6, 2, 2448, 256], [7, 2, 2448, 4]
             query=all_query, # [1, 2396, 256]

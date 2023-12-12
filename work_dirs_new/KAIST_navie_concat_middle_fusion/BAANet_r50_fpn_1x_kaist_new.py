@@ -70,7 +70,7 @@ image_size = [
     ),
 ]
 launcher = 'none'
-load_from = 'projects\\BAANet\\checkpoints\\best_coco_all_iter_3500.pth'
+load_from = 'D:/Senior/lab/mmdetection/ckpts/cascade_mask_rcnn_r50_fpn_mstrain_3x_coco_20210628_164719-5bdc3824.pth'
 log_level = 'INFO'
 log_processor = dict(by_epoch=False, type='LogProcessor', window_size=50)
 model = dict(

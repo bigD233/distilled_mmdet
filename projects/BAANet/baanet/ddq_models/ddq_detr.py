@@ -329,13 +329,23 @@ class DDQDETR(DINO):
         return decoder_inputs_dict, head_inputs_dict
 
 
+
+
+
+
+
 @MODELS.register_module()
 class DDQDETRHead(DINOHead):
 
-    def __init__(self, *args, dn_loss=True, aux_num_pos=4, **kwargs):
+    def __init__(self, *args, dn_loss=True, aux_num_pos=4, if_ignore_enc_loss=False, **kwargs):
         self.dn_loss = dn_loss
+        self.if_ignore_enc_loss = if_ignore_enc_loss
         super(DDQDETRHead, self).__init__(*args, **kwargs)
         self.aux_loss_for_dense = AuxLossModule(train_cfg=dict(assigner=dict(
+            type='TopkHungarianAssigner', topk=aux_num_pos),
+                                                               alpha=1,
+                                                               beta=6), )
+        self.aux_loss_for_dense_ir = AuxLossModule(train_cfg=dict(assigner=dict(
             type='TopkHungarianAssigner', topk=aux_num_pos),
                                                                alpha=1,
                                                                beta=6), )
@@ -691,3 +701,163 @@ class DDQDETRHead(DINOHead):
                                                    img_meta, rescale)
             result_list.append(results)
         return result_list
+
+@MODELS.register_module()
+class MultiModalDDQDETRHead(DDQDETRHead):
+    def loss(self,
+             hidden_states: Tensor,
+             references: List[Tensor],
+             enc_outputs_class: Tensor,
+             enc_outputs_coord: Tensor,
+             enc_outputs_class_ir: Tensor,
+             enc_outputs_coord_ir: Tensor,
+             batch_data_samples: SampleList,
+             dn_meta: Dict[str, int],
+             aux_enc_outputs_class=None,
+             aux_enc_outputs_coord=None,
+             aux_enc_outputs_class_ir=None,
+             aux_enc_outputs_coord_ir=None,
+             ) -> dict:
+
+        batch_gt_instances = []
+        batch_img_metas = []
+        for data_sample in batch_data_samples:
+            batch_img_metas.append(data_sample.metainfo)
+            batch_gt_instances.append(data_sample.gt_instances)
+
+        outs = self(hidden_states, references)
+        loss_inputs = outs + (enc_outputs_class, enc_outputs_coord,
+                              enc_outputs_class_ir, enc_outputs_coord_ir,
+                              batch_gt_instances, batch_img_metas, dn_meta)
+        losses = self.loss_by_feat(*loss_inputs)
+
+        aux_enc_outputs_coord = bbox_cxcywh_to_xyxy(aux_enc_outputs_coord)
+        aux_enc_outputs_coord_list = []
+        for img_id in range(len(aux_enc_outputs_coord)):
+            det_bboxes = aux_enc_outputs_coord[img_id]
+            img_shape = batch_img_metas[img_id]['img_shape']
+            det_bboxes[:, 0::2] = det_bboxes[:, 0::2] * img_shape[1]
+            det_bboxes[:, 1::2] = det_bboxes[:, 1::2] * img_shape[0]
+            aux_enc_outputs_coord_list.append(det_bboxes)
+        aux_enc_outputs_coord = torch.stack(aux_enc_outputs_coord_list)
+        aux_loss = self.aux_loss_for_dense.loss(
+            aux_enc_outputs_class.sigmoid(), aux_enc_outputs_coord,
+            [item.bboxes for item in batch_gt_instances],
+            [item.labels for item in batch_gt_instances], batch_img_metas)
+        for k, v in aux_loss.items():
+            losses[f'aux_enc_{k}'] = v
+
+        # for IR
+        aux_enc_outputs_coord_ir = bbox_cxcywh_to_xyxy(aux_enc_outputs_coord_ir)
+        aux_enc_outputs_coord_list_ir = []
+        for img_id in range(len(aux_enc_outputs_coord_ir)):
+            det_bboxes = aux_enc_outputs_coord_ir[img_id]
+            img_shape = batch_img_metas[img_id]['img_shape']
+            det_bboxes[:, 0::2] = det_bboxes[:, 0::2] * img_shape[1]
+            det_bboxes[:, 1::2] = det_bboxes[:, 1::2] * img_shape[0]
+            aux_enc_outputs_coord_list_ir.append(det_bboxes)
+        aux_enc_outputs_coord_ir = torch.stack(aux_enc_outputs_coord_list_ir)
+        aux_loss = self.aux_loss_for_dense.loss(
+            aux_enc_outputs_class_ir.sigmoid(), aux_enc_outputs_coord_ir,
+            [item.bboxes for item in batch_gt_instances],
+            [item.labels for item in batch_gt_instances], batch_img_metas)
+        for k, v in aux_loss.items():
+            losses[f'aux_ir_enc_{k}'] = v
+
+        return losses
+
+    def loss_by_feat(
+        self,
+        all_layers_cls_scores: Tensor,
+        all_layers_bbox_preds: Tensor,
+        enc_cls_scores: Tensor,
+        enc_bbox_preds: Tensor,
+        enc_cls_scores_ir: Tensor,
+        enc_bbox_preds_ir: Tensor,
+        batch_gt_instances: InstanceList,
+        batch_img_metas: List[dict],
+        dn_meta: Dict[str, int],
+        batch_gt_instances_ignore: OptInstanceList = None
+    ) -> Dict[str, Tensor]:
+
+        (all_layers_matching_cls_scores, all_layers_matching_bbox_preds,
+         all_layers_denoising_cls_scores, all_layers_denoising_bbox_preds) = \
+            self.split_outputs(
+                all_layers_cls_scores, all_layers_bbox_preds, dn_meta)
+
+        num_dense_queries = dn_meta['num_dense_queries']
+        num_layer = all_layers_matching_bbox_preds.size(0)
+        dense_all_layers_matching_cls_scores = all_layers_matching_cls_scores[:, :,
+                                                                              -num_dense_queries:]
+        dense_all_layers_matching_bbox_preds = all_layers_matching_bbox_preds[:, :,
+                                                                              -num_dense_queries:]
+
+        all_layers_matching_cls_scores = all_layers_matching_cls_scores[:, :, :
+                                                                        -num_dense_queries]
+        all_layers_matching_bbox_preds = all_layers_matching_bbox_preds[:, :, :
+                                                                        -num_dense_queries]
+
+        loss_dict = self.loss_for_distinct_queries(
+            all_layers_matching_cls_scores, all_layers_matching_bbox_preds,
+            batch_gt_instances, batch_img_metas, batch_gt_instances_ignore)
+
+        if enc_cls_scores is not None:
+
+            enc_loss_cls, enc_losses_bbox, enc_losses_iou = \
+                self.loss_by_feat_single(
+                    enc_cls_scores, enc_bbox_preds,
+                    batch_gt_instances=batch_gt_instances,
+                    batch_img_metas=batch_img_metas)
+            loss_dict['enc_loss_cls'] = enc_loss_cls
+            loss_dict['enc_loss_bbox'] = enc_losses_bbox
+            loss_dict['enc_loss_iou'] = enc_losses_iou
+
+        if enc_cls_scores_ir is not None:
+
+            enc_loss_cls_ir, enc_losses_bbox_ir, enc_losses_iou_ir = \
+                self.loss_by_feat_single(
+                    enc_cls_scores_ir, enc_bbox_preds_ir,
+                    batch_gt_instances=batch_gt_instances,
+                    batch_img_metas=batch_img_metas)
+            loss_dict['enc_loss_cls_ir'] = enc_loss_cls_ir
+            loss_dict['enc_loss_bbox_ir'] = enc_losses_bbox_ir
+            loss_dict['enc_loss_iou_ir'] = enc_losses_iou_ir
+
+        if all_layers_denoising_cls_scores is not None:
+            dn_losses_cls, dn_losses_bbox, dn_losses_iou = self.loss_dn(
+                all_layers_denoising_cls_scores,
+                all_layers_denoising_bbox_preds,
+                batch_gt_instances=batch_gt_instances,
+                batch_img_metas=batch_img_metas,
+                dn_meta=dn_meta)
+            loss_dict['dn_loss_cls'] = dn_losses_cls[-1]
+            loss_dict['dn_loss_bbox'] = dn_losses_bbox[-1]
+            loss_dict['dn_loss_iou'] = dn_losses_iou[-1]
+            for num_dec_layer, (loss_cls_i, loss_bbox_i, loss_iou_i) in \
+                    enumerate(zip(dn_losses_cls[:-1], dn_losses_bbox[:-1],
+                                  dn_losses_iou[:-1])):
+                loss_dict[f'd{num_dec_layer}.dn_loss_cls'] = loss_cls_i
+                loss_dict[f'd{num_dec_layer}.dn_loss_bbox'] = loss_bbox_i
+                loss_dict[f'd{num_dec_layer}.dn_loss_iou'] = loss_iou_i
+
+        for l_id in range(num_layer):
+            cls_scores = dense_all_layers_matching_cls_scores[l_id].sigmoid()
+            bbox_preds = dense_all_layers_matching_bbox_preds[l_id]
+
+            bbox_preds = bbox_cxcywh_to_xyxy(bbox_preds)
+            bbox_preds_list = []
+            for img_id in range(len(bbox_preds)):
+                det_bboxes = bbox_preds[img_id]
+                img_shape = batch_img_metas[img_id]['img_shape']
+                det_bboxes[:, 0::2] = det_bboxes[:, 0::2] * img_shape[1]
+                det_bboxes[:, 1::2] = det_bboxes[:, 1::2] * img_shape[0]
+                bbox_preds_list.append(det_bboxes)
+            bbox_preds = torch.stack(bbox_preds_list)
+            aux_loss = self.aux_loss_for_dense.loss(
+                cls_scores, bbox_preds,
+                [item.bboxes for item in batch_gt_instances],
+                [item.labels for item in batch_gt_instances], batch_img_metas)
+            for k, v in aux_loss.items():
+                loss_dict[f'{l_id}_aux_{k}'] = v
+
+        return loss_dict

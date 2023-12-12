@@ -462,7 +462,6 @@ train_dataloader = dict(
         pipeline=[
             dict(backend_args=None, type='LoadBGR3TFromKAIST'),
             dict(type='LoadAnnotations', with_bbox=True),
-            dict(prob=0.5, type='MultiModalYOLOXHSVRandomAug'),
             dict(
                 keep_ratio=True,
                 scales=[
@@ -512,17 +511,6 @@ train_dataloader = dict(
                     ),
                 ],
                 type='RandomChoiceResize'),
-            dict(
-                n_patches=(
-                    1,
-                    5,
-                ),
-                prob=0.5,
-                ratio=(
-                    0,
-                    0.2,
-                ),
-                type='RandomErasing'),
             dict(prob=0.5, type='RandomFlip'),
             dict(type='PackDetInputs'),
         ],

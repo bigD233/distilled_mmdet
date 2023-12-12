@@ -5,7 +5,7 @@ from .multi_branch_and_label_two_stage_detector import MultiBranchLabelTwoStageD
 
 from .multispec_faster_rcnn import MultiSpecFasterRCNN
 from .multi_branch_cascade_rcnn import MultiBranchCascadeRCNN
-from .thermal_first_cascade_rcnn import ThermalFirstCascadeRCNN
+from .thermal_first_cascade_rcnn import * 
 from .multi_label_cascade_rcnn import MultiLabelCascadeRCNN
 from .multi_label_and_branch_sparse_rcnn import MultilabelBranchSparseRCNN
 

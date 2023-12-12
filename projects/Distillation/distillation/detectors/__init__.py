@@ -1,6 +1,10 @@
 from .multispec_distillation_cascadercnn import MultiSpecDistillCascadeRCNN
 from .multispec_three_stage_detector import MultiSpecDistillDetector
-
+from .multispec_fgd_cascadercnn import MultiSpecFGDCascadeRCNN
+from .two_stage_fgd import TwoStageFGDDetector
+from .multispec_fgd_thermal_first_cascadercnn import MultiSpecFGDThermalFstCascadeRCNN
+from .multispec_fgd_thermal_first_rpn_cascadercnn import MultiSpecFGDThermalFstRPNCascadeRCNN
 __all__ = [
-    'MultiSpecDistillDetector','MultiSpecDistillCascadeRCNN',
+    'MultiSpecDistillDetector','MultiSpecDistillCascadeRCNN','MultiSpecFGDCascadeRCNN','TwoStageFGDDetector','MultiSpecFGDThermalFstCascadeRCNN',
+    'MultiSpecFGDThermalFstRPNCascadeRCNN'
 ]

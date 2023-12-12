@@ -8,6 +8,8 @@ import numpy as np
 from torchvision import transforms
 from torchvision.ops import DeformConv2d
 import math
+from mmengine.utils import to_2tuple
+import torch.nn.functional as F
 
 class DConv(nn.Module):
     def __init__(self, inplanes, planes, kernel_size=3, stride=2, padding=1, bias=False):
@@ -294,12 +296,52 @@ class IlluminationNetwork(nn.Module):
 class TransformerFusionModule(nn.Module):
     def __init__(
         self,
+        feat_size,
+        num_layers = 4,
+        d_model = 256,
+        num_heads = 8
+    ):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model = d_model * 2,
+            nhead = num_heads,
+            dim_feedforward = d_model * 2,
+        )
+        self.fusion_conv = DWConv(in_channels=256 * 2, out_channels=256, ksize=3)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        max_len = feat_size[0] * feat_size[1]
+        pe = torch.zeros(max_len, d_model * 2)
+        for pos in range(max_len):
+            for i in range(0, d_model, 2):
+                pe[pos, i] = math.sin(pos / (10000 ** ((2 * i) / d_model)))
+                pe[pos, i + 1] = math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
+        self.pe = pe.unsqueeze(0).cuda()
+
+    def forward(self, x, x_ir):
+        # 维度变为 B C S
+        B, C, H, W = x.size() #BCHW
+        x_hw = x.view(B, C, H * W) # B C HW
+        x_ir_hw = x_ir.view(B, C, H * W) # B C HW
+        fusion_feat = torch.cat([x_hw, x_ir_hw], dim = 1) # B 2C HW
+
+        fusion_feat = fusion_feat + self.pe.permute(0, 2, 1) # [1, 512, 800]
+        fusion_feat = self.encoder(fusion_feat.permute(2, 0, 1))
+        # import pdb; pdb.set_trace()
+        fusion_feat = fusion_feat.view(B, 2 * C, H, W) # [4, 512, 25, 32]
+        fusion_feat = self.fusion_conv(fusion_feat) # [4, 256, 25, 32]
+
+        return fusion_feat
+
+@MODELS.register_module()
+class MultiLevelTransformerFusionModule(nn.Module):
+    def __init__(
+        self,
         max_len,
         d_model = 256,
         num_heads = 8
     ):
         super().__init__()
-        num_layers = 4
+        num_layers = 3
         encoder_layer = nn.TransformerEncoderLayer(
             d_model = d_model * 2,
             nhead = num_heads,
@@ -326,5 +368,156 @@ class TransformerFusionModule(nn.Module):
         # import pdb; pdb.set_trace()
         fusion_feat = fusion_feat.view(B, 2 * C, H, W)
         fusion_feat = self.fusion_conv(fusion_feat)
+
+        return fusion_feat
+
+class PatchEmbed(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=1024, norm_layer=None, flatten=True):
+        super().__init__()
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        self.img_size = img_size
+        self.patch_size = patch_size
+        # 14, 14
+        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
+        # 14 * 14 = 196
+        self.num_patches = self.grid_size[0] * self.grid_size[1]
+        self.flatten = flatten
+        # 256, 32, 25 -> 256, 10, 8
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        assert H == self.img_size[0] and W == self.img_size[1], \
+            f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
+        x = self.proj(x) # B, 256, 200, 256 -> B, 1024, 12, 16
+        if self.flatten:
+            x = x.flatten(2)  # B, 1024, 12, 16 -> B, 1024(D), 12*16(N)
+        x = self.norm(x)
+        return x
+
+@MODELS.register_module()
+class VisionTransformerFusionModule(nn.Module):
+    def __init__(
+        self,
+        feat_size,
+        patch_size,
+        num_layers = 4,
+        d_model = 256,
+        num_heads = 8
+    ):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model = d_model,
+            nhead = num_heads,
+            dim_feedforward = d_model,
+        )
+        self.d_model = d_model
+        self.fusion_conv = DWConv(in_channels=256 * 2, out_channels=256, ksize=3)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+        max_len = (feat_size[0] // patch_size) * (feat_size[1] // patch_size) * 2
+        pe = torch.zeros(max_len, d_model)
+        for pos in range(max_len):
+            for i in range(0, d_model, 2):
+                pe[pos, i] = math.sin(pos / (10000 ** ((2 * i) / d_model)))
+                pe[pos, i + 1] = math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
+        self.pe = pe.unsqueeze(0).cuda()
+
+        self.patch_emb_1 = PatchEmbed(feat_size, patch_size=patch_size, in_chans=256, embed_dim=d_model, norm_layer=None, flatten=True)
+        self.patch_emb_2 = PatchEmbed(feat_size, patch_size=patch_size, in_chans=256, embed_dim=d_model, norm_layer=None, flatten=True)
+
+        self.conv_transpose_rgb = nn.ConvTranspose2d(d_model, d_model, kernel_size=2, stride=2, padding=0)
+        self.conv_transpose_ir = nn.ConvTranspose2d(d_model, d_model, kernel_size=2, stride=2, padding=0)
+        
+        self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+
+
+    def forward(self, x, x_ir):
+        # 维度变为 B C S
+        B, C, H, W = x.size() #BCHW
+        x_patch_emb = self.patch_emb_1(x) # B, C, H, W -> B, D, N(H / patch_size * W / patch_size) [4, 256, 80]
+        x_ir_patch_emb = self.patch_emb_2(x_ir)
+
+        fusion_feat = torch.cat([x_patch_emb, x_ir_patch_emb], dim = 2) # B D 2*N [4, 256, 80*2]
+
+        fusion_feat = fusion_feat + self.pe.permute(0, 2, 1) # [160, 4, 256]
+        fusion_feat = self.encoder(fusion_feat.permute(2, 0, 1)) # [160(N), 4, 256(D)]
+        fusion_feat_rgb = fusion_feat.permute(1, 2, 0)[:, :, :self.patch_emb_1.num_patches]\
+                                    .view(B, self.d_model, self.patch_emb_1.grid_size[0], self.patch_emb_1.grid_size[1]) # [4, 256, 80] -> [4, 256, 8, 10]
+        fusion_feat_ir = fusion_feat.permute(1, 2, 0)[:, :, self.patch_emb_1.num_patches:]\
+                                    .view(B, self.d_model, self.patch_emb_1.grid_size[0], self.patch_emb_1.grid_size[1]) # [4, 256, 80] -> [4, 256, 8, 10]
+
+        fusion_feat_rgb = self.conv_transpose_rgb(fusion_feat_rgb)
+        fusion_feat_ir = self.conv_transpose_ir(fusion_feat_ir)
+
+        # fusion_feat_rgb = F.interpolate(fusion_feat_rgb, scale_factor=2, mode='bilinear', align_corners=False)
+        # fusion_feat_ir = F.interpolate(fusion_feat_ir, scale_factor=2, mode='bilinear', align_corners=False)
+
+        # fusion_feat = torch.cat([fusion_feat_rgb, fusion_feat_ir], dim = 1)
+        fusion_feat = fusion_feat_rgb + fusion_feat_ir
+
+        return fusion_feat
+    
+
+@MODELS.register_module()
+class ConfidenceFusionModule(nn.Module):
+    def __init__(
+        self,
+        in_channels = 256,
+        mid_channels = 256
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.internal_conf_rgb = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, 1, kernel_size=1)
+        )
+        self.internal_conf_ir = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, 1, kernel_size=1)
+        )
+        self.interaction_conf = nn.Sequential(
+            nn.Conv2d(2 * in_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=1),
+            nn.BatchNorm2d(mid_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, 1, kernel_size=1)
+        )
+
+    def forward(self, x, x_ir):
+        conf_mask_rgb = torch.sigmoid(self.internal_conf_rgb(x))
+        conf_mask_ir_in = torch.sigmoid(self.internal_conf_rgb(x_ir))
+
+        cat_feat = torch.cat([x, x_ir], dim = 1)
+        conf_mask_interaction = torch.sigmoid(self.interaction_conf(cat_feat))
+
+        x_w = conf_mask_rgb * x
+
+        conf_mask_ir = (conf_mask_rgb * conf_mask_interaction + conf_mask_ir_in) * 0.5
+        x_ir_w = conf_mask_ir * x_ir
+
+        fusion_feat = x_w + x_ir_w
 
         return fusion_feat

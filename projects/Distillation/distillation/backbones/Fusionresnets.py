@@ -514,7 +514,7 @@ class FusionResNet(BaseModule):
             self.res_layers.append(layer_name)
 
 
-        self._fusion_layer_stem()
+        self._fusion_layer_stem(in_channels,stem_channels)
 
         self._freeze_stages()
 
@@ -522,7 +522,7 @@ class FusionResNet(BaseModule):
             len(self.stage_blocks) - 1)
 
 
-    def _fusion_layer_stem(self):
+    def _fusion_layer_stem(self,in_channels,stem_channels):
         pretrained_dict = torch.load(self.weight_path)
         model_dict = self.state_dict()
         # 筛选出与预训练模型的dict键对应的权重
@@ -532,23 +532,36 @@ class FusionResNet(BaseModule):
         self.load_state_dict(model_dict)
         print("Initialize successfully!")
 
-
         # prepare the 3*3 conv layer to fuse the ir and rgb images.
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.fusion_layers=[]
+
+        fusion_conv1 = build_conv_layer(
+                self.conv_cfg,
+                in_channels*2,
+                stem_channels,
+                kernel_size=7,
+                stride=2,
+                padding=3,
+                bias=False)
+        with torch.no_grad():
+            fusion_conv1.weight[:, :3, :, :] = self.conv1.weight / 2
+            fusion_conv1.weight[:, 3:, :, :] = self.conv1.weight / 2
+        self.fusion_conv1 = fusion_conv1
+
+        # self.fusion_layers=[]
         
-        fusion_ir_layer=nn.Conv2d(3,3,3,padding = 1).to(device)
-        fusion_rgb_layer=nn.Conv2d(3,3,3,padding = 1).to(device)
-        fusion_reduct_layer = nn.Conv2d(6,3,1).to(device)
+        # fusion_ir_layer=nn.Conv2d(3,3,3,padding = 1).to(device)
+        # fusion_rgb_layer=nn.Conv2d(3,3,3,padding = 1).to(device)
+        # fusion_reduct_layer = nn.Conv2d(6,3,1).to(device)
 
-        self.add_module('fusion_ir', fusion_ir_layer)
-        self.fusion_layers.append('fusion_ir')
+        # self.add_module('fusion_ir', fusion_ir_layer)
+        # self.fusion_layers.append('fusion_ir')
 
-        self.add_module('fusion_rgb', fusion_rgb_layer)
-        self.fusion_layers.append('fusion_rgb')
+        # self.add_module('fusion_rgb', fusion_rgb_layer)
+        # self.fusion_layers.append('fusion_rgb')
 
-        self.add_module('fusion_reduct', fusion_reduct_layer)
-        self.fusion_layers.append('fusion_reduct')
+        # self.add_module('fusion_reduct', fusion_reduct_layer)
+        # self.fusion_layers.append('fusion_reduct')
         
         print("fusion layer prepared!")
 
@@ -694,27 +707,27 @@ class FusionResNet(BaseModule):
         """Forward function."""
         torch.autograd.set_detect_anomaly(True)
 
-        x_rgb = x[:, :3, :, :]
-        x_ir = x[:, 3:, :, :]
+        # x_rgb = x[:, :3, :, :]
+        # x_ir = x[:, 3:, :, :]
 
-        fusion_ir_layer = getattr(self, 'fusion_ir')
-        fusion_rgb_layer=getattr(self, 'fusion_rgb')
-        fusion_reduct_layer = getattr(self, 'fusion_reduct')
+        # fusion_ir_layer = getattr(self, 'fusion_ir')
+        # fusion_rgb_layer=getattr(self, 'fusion_rgb')
+        # fusion_reduct_layer = getattr(self, 'fusion_reduct')
 
-        x_ir_1 = fusion_ir_layer(x_ir)
-        x_ir_2 = self.relu(x_ir_1)
-        x_ir_2 = torch.add(x_ir_2, x_ir)
-        x_rgb_1 = fusion_rgb_layer(x_rgb)
-        x_rgb_2 = self.relu(x_rgb_1)
-        x_rgb_2 = torch.add(x_rgb_2,x_rgb) 
-        x_cat = torch.cat([x_rgb_2, x_ir_2], dim=1)
-        x = fusion_reduct_layer(x_cat)
+        # x_ir_1 = fusion_ir_layer(x_ir)
+        # x_ir_2 = self.relu(x_ir_1)
+        # x_ir_2 = torch.add(x_ir_2, x_ir)
+        # x_rgb_1 = fusion_rgb_layer(x_rgb)
+        # x_rgb_2 = self.relu(x_rgb_1)
+        # x_rgb_2 = torch.add(x_rgb_2,x_rgb) 
+        # x_cat = torch.cat([x_rgb_2, x_ir_2], dim=1)
+        # x = fusion_reduct_layer(x_cat)
         # x = x_cat
  
         if self.deep_stem:
             x = self.stem(x)
         else:
-            x = self.conv1(x)
+            x = self.fusion_conv1(x)
             x = self.norm1(x)
             x = self.relu(x)
         x = self.maxpool(x)

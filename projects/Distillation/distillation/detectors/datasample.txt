@@ -1,0 +1,68 @@
+[<DetDataSample(
+
+    META INFORMATION
+    flip: True
+    pad_shape: (672, 864)
+    ori_shape: (512, 640)
+    img_path: 'D:/Senior/lab/KAIST/kaist_test_anno/kaist_train/set02/V003/lwir/I00225.png'
+    img_shape: (672, 840)
+    scale_factor: (1.3125, 1.3125)
+    flip_direction: 'horizontal'
+    batch_input_shape: (768, 960)
+    img_id: 5256
+
+    DATA FIELDS
+    ignored_instances: <InstanceData(
+
+            META INFORMATION
+
+            DATA FIELDS
+            labels: tensor([], device='cuda:0', dtype=torch.int64)
+            bboxes: tensor([], device='cuda:0', size=(0, 4))
+        ) at 0x25e38aae6d0>
+    gt_instances: <InstanceData(
+
+            META INFORMATION
+
+            DATA FIELDS
+            labels: tensor([0, 0, 0, 0, 0], device='cuda:0')
+            bboxes: tensor([[244.1250, 297.9375, 275.6250, 375.3750],
+                        [ 80.0625, 291.3750, 111.5625, 368.8125],
+                        [200.8125, 290.0625, 229.6875, 364.8750],
+                        [161.4375, 283.5000, 192.9375, 358.3125],
+                        [270.3750, 322.8750, 295.3125, 383.2500]], device='cuda:0')
+        ) at 0x25e38aae6a0>
+) at 0x25e38aae790>, <DetDataSample(
+
+    META INFORMATION
+    flip: True
+    pad_shape: (768, 960)
+    ori_shape: (512, 640)
+    img_path: 'D:/Senior/lab/KAIST/kaist_test_anno/kaist_train/set02/V003/lwir/I00871.png'
+    img_shape: (768, 960)
+    scale_factor: (1.5, 1.5)
+    flip_direction: 'horizontal'
+    batch_input_shape: (768, 960)
+    img_id: 7183
+
+    DATA FIELDS
+    ignored_instances: <InstanceData(
+
+            META INFORMATION
+
+            DATA FIELDS
+            labels: tensor([], device='cuda:0', dtype=torch.int64)
+            bboxes: tensor([], device='cuda:0', size=(0, 4))
+        ) at 0x25e38aae3a0>
+    gt_instances: <InstanceData(
+
+            META INFORMATION
+
+            DATA FIELDS
+            labels: tensor([0, 0, 0, 0], device='cuda:0')
+            bboxes: tensor([[106.5000, 316.5000, 142.5000, 405.0000],
+                        [646.5000, 321.0000, 663.0000, 361.5000],
+                        [586.5000, 319.5000, 603.0000, 361.5000],
+                        [666.0000, 315.0000, 684.0000, 358.5000]], device='cuda:0')
+        ) at 0x25e38aae190>
+) at 0x25e38aae610>]

@@ -2,6 +2,7 @@
 from mmdet.registry import MODELS
 from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
 from .multispec_three_stage_detector import MultiSpecDistillDetector
+from .two_stage_fgd import TwoStageFGDDetector
 
 
 @MODELS.register_module()

@@ -7,7 +7,8 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
-
+from mmengine.runner import load_checkpoint
+from mmengine.model.utils import revert_sync_batchnorm
 from mmengine.config import Config
 
 from mmdet.registry import MODELS
@@ -31,17 +32,17 @@ def FMSE_loss(current_bacth, true_batch):
     # current_bacth = layer_norm(current_bacth)
     # true_batch = layer_norm(true_batch)
 
-    d = torch.sum(abs(current_bacth-true_batch), dim=1, keepdim=True)
+    d = torch.sum((current_bacth-true_batch)**2, dim=1, keepdim=True)
     # print(d.shape)
     
     # print(d)
-    print(d.max())
-    print(d.min())
+    # print(d.max())
+    # print(d.min())
     soft_d = F.softmax(d.view(batch_size, 1, -1), dim=2)
     
     soft_d = soft_d.view(d.size())
-    print(soft_d.max())
-    print(soft_d.min())
+    # print(soft_d.max())
+    # print(soft_d.min())
     loss_matrix = soft_d * d
 
     loss = torch.sum(loss_matrix)
@@ -50,6 +51,7 @@ def FMSE_loss(current_bacth, true_batch):
     return loss
 
 
+# SET_FLAG = False
 
 @MODELS.register_module()
 class MultiSpecDistillDetector(BaseDetector):
@@ -75,10 +77,14 @@ class MultiSpecDistillDetector(BaseDetector):
             data_preprocessor=data_preprocessor, init_cfg=init_cfg)
         
         self.backbone = MODELS.build(backbone)
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         self.enable_distilled = enable_distilled
-        if self.enable_distilled:
-            self.distilled_backbone , self.distilled_neck = init_backbone_neck(distilled_file_config,distilled_checkpoint)
+
+        self.distilled_file_config = distilled_file_config
+        self.distilled_checkpoint = distilled_checkpoint
+        self.SET_FLAG = False
+        # if self.enable_distilled:
+        #     self.distilled_backbone , self.distilled_neck = init_backbone_neck(distilled_file_config,distilled_checkpoint)
         
         if neck is not None:
             self.neck = MODELS.build(neck)
@@ -110,6 +116,12 @@ class MultiSpecDistillDetector(BaseDetector):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
 
+        if self.enable_distilled:
+            self.distilled_backbone, self.distilled_neck = self._load_distilled_weights()
+
+        # import pdb 
+        # pdb.set_trace()
+
     def _load_from_state_dict(self, state_dict: dict, prefix: str,
                               local_metadata: dict, strict: bool,
                               missing_keys: Union[List[str], str],
@@ -134,48 +146,60 @@ class MultiSpecDistillDetector(BaseDetector):
                                       strict, missing_keys, unexpected_keys,
                                       error_msgs)
 
+
+    def _load_distilled_weights(self, device: str = 'cuda:0'):
+        config = Config.fromfile(self.distilled_file_config)
+
+        model_backbone = MODELS.build(config.model.backbone)
+        model_neck = MODELS.build(config.model.neck)
+        model_neck = revert_sync_batchnorm(model_neck)
+        model_backbone = revert_sync_batchnorm(model_backbone)
+
+        load_checkpoint(model_backbone, self.distilled_checkpoint, map_location='cpu',revise_keys=[(r'^backbone\.', '')])
+        load_checkpoint(model_neck, self.distilled_checkpoint, map_location='cpu',revise_keys=[(r'^neck\.', '')])
+
+        model_neck.eval()
+        model_backbone.eval()
+
+
+        return model_backbone,model_neck
     
-    def _generate_mask(self,batch_data_samples: SampleList):
-        
-        for data_sample in batch_data_samples:
-            bboxes = data_sample.gt_instances.bboxes
-            
-    
-    
-    def _distilled_loss(self,batch_inputs: Tensor,
-                        batch_data_samples: SampleList,
-                        x)-> Tuple[Tensor]:
+    def _mask_loss(self,mask,batch_data_samples):
+        current_shape =mask.shape
+        # print('current shape',current_shape)
+        scale = 1
+        mask_gt = torch.zeros(current_shape,device='cuda:0')
+
+        for i in range(len(batch_data_samples)):
+            # print(batch_data_samples)
+            bboxes = batch_data_samples[i].gt_instances.bboxes
+            bboxes = torch.floor(bboxes/scale)            
+
+            for bbox in bboxes:
+                xmin, ymin, xmax, ymax = bbox
+                mask_gt[i, :, int(ymin):int(ymax), int(xmin):int(xmax)] = 1
+
+        dice_loss =1-  (2*torch.sum(mask*mask_gt)+0.001)/(torch.sum(mask)+torch.sum(mask_gt)+0.001)
+        loss = dict()
+        loss['mask_loss'] = dice_loss
+
+        return loss
+
+
+
+    def _distilled_loss(self,batch_inputs: Tensor,x)-> Tuple[Tensor]:
 
         x_truth = self.distilled_backbone(batch_inputs)
         x_truth = self.distilled_neck(x_truth)
         
         masks = []
-
-        scales = [8,16,32,64,128]
-        for index in range(len(x_truth)):
-
-            current_shape = x[index].shape
-            mask = torch.zeros(current_shape,device='cuda:0')
-
-            for i in range(len(batch_data_samples)):
-
-                bboxes = batch_data_samples[i].gt_instances.bboxes
-                bboxes = torch.floor(bboxes/scales[index])            
-
-                for bbox in bboxes:
-                    xmin, ymin, xmax, ymax = bbox
-                    mask[i, :, int(ymin):int(ymax), int(xmin):int(xmax)] = 1
-
-            masks.append(mask)           
+        
         
 
         distilled_loss = 0
         for i in range(len(x)):
-            # multiply with mask
-            x_mask = x[i] * masks[i]
-            x_truth_mask = x_truth[i] * masks[i]
 
-            distilled_loss += FMSE_loss(x_mask,x_truth_mask)
+            distilled_loss += FMSE_loss(x[i],x_truth[i])
         distilled_loss = distilled_loss/len(x)
         loss = dict()
         loss['distilled_loss'] = distilled_loss
@@ -204,7 +228,8 @@ class MultiSpecDistillDetector(BaseDetector):
             different resolutions.
         """
         x = self.backbone(batch_inputs)
-        
+        # for i in x :
+        #     print(i.shape)
         # when batch size is 4 , x is a tuple with tensors below.
         # torch.Size([4, 256, 128, 160])
         # torch.Size([4, 512, 64, 80])
@@ -213,18 +238,19 @@ class MultiSpecDistillDetector(BaseDetector):
         
 
         if self.with_neck:
-            x = self.neck(x)
+            x,mask = self.neck(x)
 
 
         # for i in x :
         #     print(i.shape)
+        # print(mask.shape)
         # torch.Size([1, 256, 152, 192])
         # torch.Size([1, 256, 76, 96])
         # torch.Size([1, 256, 38, 48])
         # torch.Size([1, 256, 19, 24])
         # torch.Size([1, 256, 10, 12])
 
-        return x
+        return x,mask
 
     def _forward(self, batch_inputs: Tensor,
                  batch_data_samples: SampleList) -> tuple:
@@ -242,7 +268,7 @@ class MultiSpecDistillDetector(BaseDetector):
             forward.
         """
         results = ()
-        x = self.extract_feat(batch_inputs)
+        x, mask = self.extract_feat(batch_inputs)
 
         if self.with_rpn:
             rpn_results_list = self.rpn_head.predict(
@@ -271,15 +297,31 @@ class MultiSpecDistillDetector(BaseDetector):
         Returns:
             dict: A dictionary of loss components
         """
-        x = self.extract_feat(batch_inputs)
+        if not self.SET_FLAG:
+            SET_FLAG = True
+            self.distilled_backbone.eval()
+            self.distilled_neck.eval()
+        x, mask = self.extract_feat(batch_inputs)
         # print(x[0].shape)
 
-        # print(batch_data_samples[0].gt_instances.bboxes)
+        # print(batch_data_samples[0])
         # bboxes = batch_data_samples[0].gt_instances.bboxes
         # print(torch.floor(bboxes/8))
         
         losses = dict()
-
+        import pdb 
+        pdb.set_trace()
+        
+        checkpoint = torch.load(self.distilled_checkpoint)
+        # print(dict(self.named_parameters()).keys())
+        threshold = 1e-4
+        tensor1 = dict(checkpoint['state_dict'])['neck.lateral_convs.1.conv.weight']
+        tensor2 = dict(self.named_parameters())['distilled_neck.lateral_convs.1.conv.weight'].to('cpu')
+        are_equal = torch.allclose(tensor1,tensor2,atol=1e-3)
+        print(are_equal)
+        # print(dict(checkpoint['state_dict'])['neck.lateral_convs.1.conv.weight'] == dict(self.named_parameters())['distilled_neck.lateral_convs.1.conv.weight'].to('cpu'))
+        # print(dict(checkpoint['state_dict'])['neck.lateral_convs.1.conv.weight'])
+        # print(dict(self.named_parameters())['distilled_neck.lateral_convs.1.conv.weight'].to('cpu'))
         # RPN forward and loss
         if self.with_rpn:
             proposal_cfg = self.train_cfg.get('rpn_proposal',
@@ -310,8 +352,11 @@ class MultiSpecDistillDetector(BaseDetector):
                                         batch_data_samples)
         losses.update(roi_losses)
 
+        mask_loss = self._mask_loss(mask,batch_data_samples)
+        losses.update(mask_loss)
+        
         if self.enable_distilled:
-            dis_loss = self._distilled_loss(batch_inputs,batch_data_samples,x)
+            dis_loss = self._distilled_loss(batch_inputs,x)
             losses.update(dis_loss)
 
         # print(losses)
@@ -348,8 +393,8 @@ class MultiSpecDistillDetector(BaseDetector):
         """
 
         assert self.with_bbox, 'Bbox head must be implemented.'
-        x = self.extract_feat(batch_inputs)
-
+        x,mask = self.extract_feat(batch_inputs)
+        # print(batch_data_samples)
         # If there are no pre-defined proposals, use RPN to get proposals
         if batch_data_samples[0].get('proposals', None) is None:
             rpn_results_list = self.rpn_head.predict(
@@ -364,4 +409,4 @@ class MultiSpecDistillDetector(BaseDetector):
 
         batch_data_samples = self.add_pred_to_datasample(
             batch_data_samples, results_list)
-        return batch_data_samples
+        return batch_data_samples,mask

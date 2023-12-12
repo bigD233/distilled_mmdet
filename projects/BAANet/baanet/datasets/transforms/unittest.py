@@ -16,7 +16,7 @@ import math
 from mmdet.registry import MODELS
 import torch.nn as nn
 import torch.nn.functional as F
-from projects.Distillation.distillation.datasets.kaist_dataset import KAISTDataset
+from projects.BAANet.baanet.datasets.kaist_dataset import KAISTDataset
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 

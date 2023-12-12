@@ -341,22 +341,24 @@ class MultiModalMultiScaleDeformableAttention(BaseModule):
         value = self.value_proj(value) # [1, 7953, 256]
         if key_padding_mask is not None:
             value = value.masked_fill(key_padding_mask[..., None], 0.0) # [1, 7953, 256]
-        value = value.view(bs, num_value, self.num_heads, -1) # [1, 7953, 8, 32]
+        value = value.view(bs, num_value, self.num_heads, -1) # [1, 7953 * 2, 8, 32]
 
         if self.training:
             p = 1 # random.random()
         else:
-            p = 1    
+            p = 1
         if p < 1/3: # only rgb
             sampling_offsets = self.sampling_offsets(query).view( # [1, 2396, 8, 4, 4, 2]
                 bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
             attention_weights = self.attention_weights(query).view( # [1, 2396, 8, 4*4]
                 bs, num_query, self.num_heads, self.num_levels * self.num_points)
+            value = value[:, :int(value.shape[1]/2), :, :].contiguous()
         elif p >= 1/3 and p < 2/3:
             sampling_offsets = self.sampling_offsets_ir(query).view( # [1, 2396, 8, 4, 4, 2]
                 bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
             attention_weights = self.attention_weights_ir(query).view( # [1, 2396, 8, 4*4]
                 bs, num_query, self.num_heads, self.num_levels * self.num_points)
+            value = value[:, int(value.shape[1]/2):, :, :].contiguous()
         elif p >= 2/3:
             sampling_offsets_rgb = self.sampling_offsets(query).view( # [1, 2396, 8, 4, 4, 2]
                 bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
@@ -366,13 +368,13 @@ class MultiModalMultiScaleDeformableAttention(BaseModule):
                 bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
             attention_weights_ir = self.attention_weights_ir(query).view( # [1, 2396, 8, 4*4]
                 bs, num_query, self.num_heads, self.num_levels * self.num_points)
-            sampling_offsets = torch.cat([sampling_offsets_rgb, sampling_offsets_ir], dim=-3) # [1, 2396, 8, 8, 4, 2]
+            sampling_offsets = torch.cat([sampling_offsets_rgb, sampling_offsets_ir], dim=-3) # [1, 2396, 8, 8(num_lvls), 4(num_pts), 2]
             attention_weights = torch.cat([attention_weights_rgb, attention_weights_ir], dim=-1) # [1, 2396, 8, 32]
 
+            reference_points = torch.cat([reference_points, reference_points], dim=-2)
             spatial_shapes = torch.cat([spatial_shapes, spatial_shapes]) # [4 * 2, 2]
-            level_start_index = torch.cat([level_start_index, level_start_index + level_start_index[-1]]) # [4 * 2]
-
-
+            level_start_index = torch.cat([level_start_index, level_start_index + level_start_index[-1] \
+                                           + spatial_shapes[-1][0]*spatial_shapes[-1][1]]) # [4 * 2]
 
         attention_weights = attention_weights.softmax(-1)
 
@@ -387,7 +389,7 @@ class MultiModalMultiScaleDeformableAttention(BaseModule):
             sampling_locations = reference_points[:, :, None, :, None, :] \
                 + sampling_offsets \
                 / offset_normalizer[None, None, None, :, None, :]
-        elif reference_points.shape[-1] == 4: # [1, 2396, 4, 4]
+        elif reference_points.shape[-1] == 4: # [1, 2396, 4 * 2, 4]
             # [1, 2396, 8, 4, 4, 2]
             sampling_locations = reference_points[:, :, None, :, None, :2] \
                 + sampling_offsets / self.num_points \
@@ -399,7 +401,7 @@ class MultiModalMultiScaleDeformableAttention(BaseModule):
                 f' 2 or 4, but get {reference_points.shape[-1]} instead.')
         if ((IS_CUDA_AVAILABLE and value.is_cuda)
                 or (IS_MLU_AVAILABLE and value.is_mlu)):
-            output = MultiScaleDeformableAttnFunction.apply(
+            output = MultiScaleDeformableAttnFunction.apply(  
                 value, spatial_shapes, level_start_index, sampling_locations,
                 attention_weights, self.im2col_step)
         else:

@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from .cityscapes_metric import CityScapesMetric
 from .coco_metric import CocoMetric
-from .kaist_missrate_metric import KAISTMissrateMetric
+from .kaist_missrate_metric import *
 from .flir_missrate_metric import FLIRMissrateMetric
 from .coco_occluded_metric import CocoOccludedSeparatedMetric
 from .coco_panoptic_metric import CocoPanopticMetric

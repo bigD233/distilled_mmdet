@@ -689,7 +689,6 @@ class MultiModalDDQDETR(MultiModalDINO):
         else:
             new_dn_mask = None
         
-        
         query = all_query
         dn_mask = new_dn_mask
         reference_points = all_ref_pts

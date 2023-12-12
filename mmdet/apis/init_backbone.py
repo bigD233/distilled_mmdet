@@ -3,7 +3,7 @@ import copy
 import warnings
 from pathlib import Path
 from typing import Optional, Sequence, Union
-
+import logging
 import numpy as np
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ from mmengine.dataset import default_collate
 from mmengine.model.utils import revert_sync_batchnorm
 from mmengine.registry import init_default_scope
 from mmengine.runner import load_checkpoint
+from mmengine.logging import print_log
 
 from mmdet.registry import DATASETS
 from mmdet.utils import ConfigType
@@ -127,4 +128,8 @@ def init_backbone_neck(
 
     model_neck.to(device)
     model_neck.eval()
+
+
+    print_log('Successfully load the dicts of the backbone and neck of the two-stream network!!!',
+                    level=logging.INFO)
     return model_backbone , model_neck

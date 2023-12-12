@@ -7,7 +7,9 @@ import numpy as np
 from mmcv.transforms import BaseTransform
 import mmcv
 from mmdet.datasets import CocoDataset
-import cv2
+from mmdet.structures.bbox import get_box_type
+from mmcv.transforms import LoadAnnotations as MMCV_LoadAnnotations
+import cv2, os
 import torch
 from typing import List, Optional, Sequence, Tuple, Union
 from numbers import Number
@@ -96,19 +98,31 @@ class LoadBGR3TFromKAIST(BaseTransform):
         Returns:
             dict: The dict contains loaded image and meta information.
         """
-
-        filename_ir = results['img_path']
-        # print(filename_ir)
-        if 'train' in filename_ir:
-            
-            path_prefix=filename_ir.split('lwir')[0]
-            
-            image_name = filename_ir.split('lwir')[1]
-            
-            filename_rgb=path_prefix+'visible'+image_name
-        else: 
-            filename_ir = filename_ir + '_lwir.png'
-            filename_rgb = filename_ir.replace('lwir', 'visible')
+        if 'visible' in results['img_path']:
+            filename_rgb = results['img_path']
+            if 'train' in filename_rgb:
+                path_prefix=filename_rgb.split('visible')[0]
+                image_name = filename_rgb.split('visible')[1]
+                filename_ir=path_prefix+'lwir'+image_name
+            if 'test' in filename_rgb: 
+                filename_rgb = filename_rgb + '_visible.png'
+                # filename_ir = filename_rgb.replace('visible', 'lwir')
+                filename_rgb = os.path.dirname(filename_ir).replace('lwir', 'visible') + '_complex_light_new/' + \
+                    os.path.basename(filename_ir).replace('lwir', 'visible')
+        else:
+            filename_ir = results['img_path']
+            if 'train' in filename_ir:
+                path_prefix=filename_ir.split('lwir')[0]
+                image_name = filename_ir.split('lwir')[1]
+                filename_rgb=path_prefix+'visible'+image_name
+            if 'test' in filename_ir: 
+                if 'complex' not in filename_ir:
+                    filename_ir = filename_ir + '_lwir.png'
+                    filename_rgb = filename_ir.replace('lwir', 'visible')
+                else:
+                    filename_ir = filename_ir.replace("complex_light_new_", "") + '_lwir.png'
+                    filename_rgb = os.path.dirname(filename_ir).replace('lwir', 'visible') + '_complex_light_new/' + \
+                        os.path.basename(filename_ir).replace('lwir', 'visible')
         try:
             if self.file_client_args is not None:
                 file_client_ir = fileio.FileClient.infer_client(
@@ -531,6 +545,202 @@ class Normalize_Pad(BaseTransform):
         data['img'] = batch_inputs
         # data.setdefault('data_samples', None)
         return data
+
+
+
+
+@TRANSFORMS.register_module()
+class LoadMultiAnnotations(MMCV_LoadAnnotations):
+    """Load and process the ``instances`` and ``seg_map`` annotation provided
+    by dataset.
+
+    The annotation format is as the following:
+
+    .. code-block:: python
+
+        {
+            'instances':
+            [
+                {
+                # List of 4 numbers representing the bounding box of the
+                # instance, in (x1, y1, x2, y2) order.
+                'bbox': [x1, y1, x2, y2],
+
+                # Label of image classification.
+                'bbox_label': 1,
+
+                # Used in instance/panoptic segmentation. The segmentation mask
+                # of the instance or the information of segments.
+                # 1. If list[list[float]], it represents a list of polygons,
+                # one for each connected component of the object. Each
+                # list[float] is one simple polygon in the format of
+                # [x1, y1, ..., xn, yn] (n≥3). The Xs and Ys are absolute
+                # coordinates in unit of pixels.
+                # 2. If dict, it represents the per-pixel segmentation mask in
+                # COCO’s compressed RLE format. The dict should have keys
+                # “size” and “counts”.  Can be loaded by pycocotools
+                'mask': list[list[float]] or dict,
+
+                }
+            ]
+            # Filename of semantic or panoptic segmentation ground truth file.
+            'seg_map_path': 'a/b/c'
+        }
+
+    After this module, the annotation has been changed to the format below:
+
+    .. code-block:: python
+
+        {
+            # In (x1, y1, x2, y2) order, float type. N is the number of bboxes
+            # in an image
+            'gt_bboxes': BaseBoxes(N, 4)
+             # In int type.
+            'gt_bboxes_labels': np.ndarray(N, )
+             # In built-in class
+            'gt_masks': PolygonMasks (H, W) or BitmapMasks (H, W)
+             # In uint8 type.
+            'gt_seg_map': np.ndarray (H, W)
+             # in (x, y, v) order, float type.
+        }
+
+    Required Keys:
+
+    - height
+    - width
+    - instances
+
+      - bbox (optional)
+      - bbox_label
+      - mask (optional)
+      - ignore_flag
+
+    - seg_map_path (optional)
+
+    Added Keys:
+
+    - gt_bboxes (BaseBoxes[torch.float32])
+    - gt_bboxes_labels (np.int64)
+    - gt_masks (BitmapMasks | PolygonMasks)
+    - gt_seg_map (np.uint8)
+    - gt_ignore_flags (bool)
+
+    Args:
+        with_bbox (bool): Whether to parse and load the bbox annotation.
+            Defaults to True.
+        with_label (bool): Whether to parse and load the label annotation.
+            Defaults to True.
+        with_mask (bool): Whether to parse and load the mask annotation.
+             Default: False.
+        with_seg (bool): Whether to parse and load the semantic segmentation
+            annotation. Defaults to False.
+        poly2mask (bool): Whether to convert mask to bitmap. Default: True.
+        box_type (str): The box type used to wrap the bboxes. If ``box_type``
+            is None, gt_bboxes will keep being np.ndarray. Defaults to 'hbox'.
+        imdecode_backend (str): The image decoding backend type. The backend
+            argument for :func:``mmcv.imfrombytes``.
+            See :fun:``mmcv.imfrombytes`` for details.
+            Defaults to 'cv2'.
+        backend_args (dict, optional): Arguments to instantiate the
+            corresponding backend. Defaults to None.
+    """
+
+    def __init__(self,
+                 with_mask: bool = False,
+                 poly2mask: bool = True,
+                 box_type: str = 'hbox',
+                 if_merge = False,
+                 **kwargs) -> None:
+        super(LoadMultiAnnotations, self).__init__(**kwargs)
+        self.with_mask = with_mask
+        self.poly2mask = poly2mask
+        self.box_type = box_type
+        self.if_merge = if_merge
+
+    def _load_bboxes(self, results: dict) -> None:
+        """Private function to load bounding box annotations.
+
+        Args:
+            results (dict): Result dict from :obj:``mmengine.BaseDataset``.
+        Returns:
+            dict: The dict contains loaded bounding box annotations.
+        """
+        gt_bboxes = []
+        gt_ignore_flags = []
+        gt_bboxes_ir = []
+        gt_ignore_flags_ir = []
+        for instance in results.get('instances', []):
+            gt_bboxes.append(instance['bbox'])
+            gt_ignore_flags.append(instance['ignore_flag'])
+        for instance in results.get('instances_ir', []):
+            gt_bboxes_ir.append(instance['bbox'])
+            gt_ignore_flags_ir.append(instance['ignore_flag'])
+        if self.box_type is None:
+            results['gt_bboxes'] = np.array(
+                gt_bboxes, dtype=np.float32).reshape((-1, 4))
+            results['gt_bboxes_ir'] = np.array(
+                gt_bboxes_ir, dtype=np.float32).reshape((-1, 4))
+        else:
+            _, box_type_cls = get_box_type(self.box_type)
+            if self.if_merge:
+                gt_bboxes.extend(gt_bboxes_ir)
+            results['gt_bboxes'] = box_type_cls(gt_bboxes, dtype=torch.float32)
+            results['gt_bboxes_ir'] = box_type_cls(gt_bboxes_ir, dtype=torch.float32)
+        if self.if_merge:
+            gt_ignore_flags.extend(gt_ignore_flags_ir)
+        results['gt_ignore_flags'] = np.array(gt_ignore_flags, dtype=bool)
+        results['gt_ignore_flags_ir'] = np.array(gt_ignore_flags_ir, dtype=bool)
+
+    def _load_labels(self, results: dict) -> None:
+        """Private function to load label annotations.
+
+        Args:
+            results (dict): Result dict from :obj:``mmengine.BaseDataset``.
+
+        Returns:
+            dict: The dict contains loaded label annotations.
+        """
+        gt_bboxes_labels = []
+        gt_bboxes_labels_ir = []
+        for instance in results.get('instances', []):
+            gt_bboxes_labels.append(instance['bbox_label'])
+        for instance in results.get('instances_ir', []):
+            gt_bboxes_labels_ir.append(instance['bbox_label'])
+        if self.if_merge:
+            gt_bboxes_labels.extend(gt_bboxes_labels_ir)
+        results['gt_bboxes_labels'] = np.array(
+            gt_bboxes_labels, dtype=np.int64)
+        results['gt_bboxes_labels_ir'] = np.array(
+            gt_bboxes_labels_ir, dtype=np.int64)
+
+
+    def transform(self, results: dict) -> dict:
+        """Function to load multiple types annotations.
+
+        Args:
+            results (dict): Result dict from :obj:``mmengine.BaseDataset``.
+
+        Returns:
+            dict: The dict contains loaded bounding box, label and
+            semantic segmentation.
+        """
+
+        if self.with_bbox:
+            self._load_bboxes(results)
+        if self.with_label:
+            self._load_labels(results)
+        if self.with_seg:
+            self._load_seg_map(results)
+        return results
+
+    def __repr__(self) -> str:
+        repr_str = self.__class__.__name__
+        repr_str += f'(with_bbox={self.with_bbox}, '
+        repr_str += f'with_label={self.with_label}, '
+        repr_str += f'with_seg={self.with_seg}, '
+        repr_str += f"imdecode_backend='{self.imdecode_backend}', "
+        repr_str += f'backend_args={self.backend_args})'
+        return repr_str
 
 if __name__=='__main__':
     ann_test='/media/yons/1/yxx/grad_proj_data/KAIST/anno/test_anno/KAIST_test_RGB_annotation.json'

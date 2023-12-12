@@ -2,7 +2,7 @@
 import copy
 import os.path as osp
 from typing import List, Union
-
+from typing import List, Optional
 from mmengine.fileio import get_local_path
 
 from mmdet.registry import DATASETS
@@ -13,7 +13,6 @@ from mmdet.datasets.base_det_dataset import BaseDetDataset
 @DATASETS.register_module()
 class KAISTDataset(BaseDetDataset):
     """Dataset for COCO."""
-
     METAINFO = {
         'classes':
         ('person'),
@@ -32,8 +31,13 @@ class KAISTDataset(BaseDetDataset):
             List[dict]: A list of annotation.
         """  # noqa: E501
         with get_local_path(
-                self.ann_file, backend_args=self.backend_args) as local_path:
+                self.ann_file) as local_path:
             self.coco = self.COCOAPI(local_path)
+        # if self.ann_file_ir is not None:
+        #     with get_local_path(    
+        #             self.ann_file_ir) as local_path_ir:
+        #         self.coco_ir = self.COCOAPI(local_path_ir)
+
         # The order of returned `cat_ids` will not
         # change with the order of the `classes`
         self.cat_ids = self.coco.get_cat_ids(
@@ -44,17 +48,28 @@ class KAISTDataset(BaseDetDataset):
         img_ids = self.coco.get_img_ids()
         data_list = []
         total_ann_ids = []
+        # if self.ann_file_ir is not None:
+        #     total_ann_ids_ir = []
         for img_id in img_ids:
             raw_img_info = self.coco.load_imgs([img_id])[0]
             raw_img_info['img_id'] = img_id
 
             ann_ids = self.coco.get_ann_ids(img_ids=[img_id])
+            # if self.ann_file_ir is not None:
+            #     ann_ids_ir = self.coco_ir.get_ann_ids(img_ids=[img_id])
             raw_ann_info = self.coco.load_anns(ann_ids)
             total_ann_ids.extend(ann_ids)
+            # if self.ann_file_ir is not None:
+            #     raw_ann_info_ir = self.coco_ir.load_anns(ann_ids_ir)
+            #     total_ann_ids_ir.extend(ann_ids_ir)
+            # else:
+            #     raw_ann_info_ir = None
 
             parsed_data_info = self.parse_data_info({
                 'raw_ann_info':
                 raw_ann_info,
+                # 'raw_ann_info_ir': 
+                # raw_ann_info_ir,
                 'raw_img_info':
                 raw_img_info
             })
@@ -79,6 +94,7 @@ class KAISTDataset(BaseDetDataset):
         """
         img_info = raw_data_info['raw_img_info']
         ann_info = raw_data_info['raw_ann_info']
+        # ann_info_ir = raw_data_info['raw_ann_info_ir']
 
         data_info = {}
 
@@ -131,6 +147,35 @@ class KAISTDataset(BaseDetDataset):
 
             instances.append(instance)
         data_info['instances'] = instances
+        # instances_ir = []
+        # for i, ann in enumerate(ann_info_ir):
+        #     instance = {}
+
+        #     if ann.get('ignore', False):
+        #         continue
+        #     x1, y1, w, h = ann['bbox']
+        #     inter_w = max(0, min(x1 + w, img_info['width']) - max(x1, 0))
+        #     inter_h = max(0, min(y1 + h, img_info['height']) - max(y1, 0))
+        #     if inter_w * inter_h == 0:
+        #         continue
+        #     if ann.get('area') and (ann['area'] <= 0 or w < 1 or h < 1):
+        #         continue
+        #     if ann['category_id'] not in self.cat_ids:
+        #         continue
+        #     bbox = [x1, y1, x1 + w, y1 + h]
+
+        #     if ann.get('iscrowd', False):
+        #         instance['ignore_flag'] = 1
+        #     else:
+        #         instance['ignore_flag'] = 0
+        #     instance['bbox'] = bbox
+        #     instance['bbox_label'] = self.cat2label[ann['category_id']]
+
+        #     if ann.get('segmentation', None):
+        #         instance['mask'] = ann['segmentation']
+
+        #     instances_ir.append(instance)
+        # data_info['instances_ir'] = instances_ir
         return data_info
 
     def filter_data(self) -> List[dict]:

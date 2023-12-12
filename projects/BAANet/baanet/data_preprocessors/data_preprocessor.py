@@ -120,7 +120,7 @@ class BGR3TDataPreprocessor(BaseDataPreprocessor):
         # print('hhhhhhhhhhhh,im here')
         batch_pad_shape = self._get_pad_shape(data)
         data =self.my_pre_forward(data=data, training=training)
-        inputs, data_samples = data['inputs'], data['data_samples']
+        inputs, data_samples = data['inputs'], data['data_samples'] # [4, 6, 800, 1024]
 
         if data_samples is not None:
             # NOTE the batched image size information may be useful, e.g.

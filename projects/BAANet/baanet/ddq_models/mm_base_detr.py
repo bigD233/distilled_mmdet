@@ -138,6 +138,10 @@ class MultiModalDetectionTransformer(BaseDetector, metaclass=ABCMeta):
             **head_inputs_dict,
             rescale=rescale,
             batch_data_samples=batch_data_samples)
+        for res in results_list:
+            for i, label in enumerate(res['labels']):
+                if label > 1:
+                    res['labels'][i] = 1
         batch_data_samples = self.add_pred_to_datasample(
             batch_data_samples, results_list)
         return batch_data_samples
